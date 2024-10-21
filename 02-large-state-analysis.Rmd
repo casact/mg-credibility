@@ -1,0 +1,497 @@
+---
+title: "Large State Analysis"
+output: html_document
+date: "2023-12-29"
+---
+
+Large State Model: GLM vs Lasso vs Lasso Credibility
+
+This markdown is intended to be run after the countrywide analysis so that the data needed are still in our environment. 
+
+Now, we will try to fit the large state data using our countrywide model as a complement of credibility. In a perfect world, we would include the offset term as a combination of factors (vehicle_age * industry_code * ...) but it is mathematically equivalent to just take the prediction (rebalanced or not) of the lasso model as an offset. Any rebalancing (or lack thereof) would be reflected in the intercept of our new model. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in packages as needed
+
+```{r packages, echo=FALSE, include=FALSE}
+# Function to install and load packages
+install_and_load <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+# List of packages
+packages <- c("data.table", "statmod", "ggplot2", "tweedie", 
+              "glmnet", "HDtweedie", "plotly", "arrow", "knitr")
+
+# Install and load all packages
+sapply(packages, install_and_load)
+```
+
+Read in helper functions
+
+```{r echo=FALSE, include=FALSE}
+source( "helper_functions.R")
+```
+
+
+```{r}
+
+#### Large State Model ####
+
+# Now, we will create an offset and refit on the large state only data.
+lasso_intercept_exp <- exp(cw_coeff_table["(Intercept)", ]$Lasso_Coefficient)
+
+# we will remove the intercept - this will make our models more comparable.
+training_data[, complement_prediction := predict(lasso_model, training_data_matrix, s = "lambda.min")]
+validate_data[, complement_prediction := predict(lasso_model, validate_data_matrix, s = "lambda.min")]
+
+training_data[, cw_model_complement_of_credibility := lasso_prediction / lasso_intercept_exp]
+validate_data[, cw_model_complement_of_credibility := lasso_prediction / lasso_intercept_exp]
+
+summary(training_data$cw_model_complement_of_credibility)
+summary(validate_data$cw_model_complement_of_credibility)
+
+# subset to the large state only
+large_state_training_data <- training_data[subset == "large_state"]
+large_state_validate_data <- validate_data[subset == "large_state"]
+
+# create a vector with our complement of credibility
+cw_model_complement_of_credibility_vector <- large_state_training_data$cw_model_complement_of_credibility
+
+# We no longer need the state control variable
+lasso_modeling_variables <- lasso_modeling_variables[!(lasso_modeling_variables %in% c("ind_small_state", "ind_base_data", "ind_medium_state", "ind_large_state", "ind_small_state_cw_dist"))]
+
+# Again, we need to create the columns
+# This is the data format needed for HDtweedie.
+large_state_train_cols_for_matrix <- large_state_training_data[, lasso_modeling_variables, with = FALSE]
+large_state_validate_cols_for_matrix <- large_state_validate_data[, lasso_modeling_variables, with = FALSE]
+
+# Reformatting to a matrix for HDtweedie so that Lasso Tweedie can work.
+large_state_training_data_matrix <- as.matrix(large_state_train_cols_for_matrix, rownames = FALSE)
+large_state_validate_data_matrix <- as.matrix(large_state_validate_cols_for_matrix, rownames = FALSE)
+
+# Losses and CV need to be a vector
+large_state_training_loss_vector <- as.vector(large_state_training_data$incurred_loss)
+large_state_training_cv_vector <- as.vector(large_state_training_data$stratification)
+
+### testing.R ###
+
+
+```
+
+The accompanying script "testing.R" contains code that can be run at this point.First, there is code to prove that we are implementing the offset correctly in these packages. Second, there is optional code to see how our Large State model fits with the default complement of credibility.
+
+Now, we will fit our models. If you have already fit the large state lasso model, set recompute to FALSE to read it in from your working directory. 
+
+```{r}
+
+# Fit the GLM model without an offset
+large_state_glm_model <- glm(
+  formula = incurred_loss ~
+    driver_age_18_38_hinge + driver_age_38_76_hinge + driver_age_76_99_hinge +
+    vehicle_age_0_10_hinge + vehicle_age_10_99_hinge +
+    C(MultiPolicy) + C(xTreme_TurnSignal) + C(car_weight) + C(industry_code),
+  family = tweedie(1.6, link.power = 0),
+  weights = exposure,
+  # offset = cw_model_complement_of_credibility_vector, - Note, no complement here.
+  data = large_state_training_data
+)
+
+# fit the lasso model withOUT an offset
+
+recompute <- FALSE
+
+if (recompute) {
+  # fit the lasso model
+large_state_NOoffset_lasso_model <- cv.HDtweedie(
+  x = large_state_training_data_matrix,
+  y = (large_state_training_loss_vector),
+  group = NULL, p = 1.6,
+  weights = large_state_training_data$exposure, lambda = NULL,
+  pred.loss = "deviance",
+  nfolds = 4, foldid = large_state_training_cv_vector,
+  standardize = TRUE
+)
+
+  saveRDS(large_state_NOoffset_lasso_model, file = "large_state_NOoffset_lasso_model.rds")
+} else {
+  large_state_NOoffset_lasso_model <- readRDS("large_state_NOoffset_lasso_model.rds")
+}
+
+
+# add the predictions to our training data
+large_state_training_data[, glm_prediction := predict.glm(large_state_glm_model, large_state_training_data, type = "response")]
+large_state_training_data[, lasso_prediction := predict(large_state_NOoffset_lasso_model, large_state_training_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+)]
+
+large_state_validate_data[, glm_prediction := predict.glm(large_state_glm_model, large_state_validate_data, type = "response")]
+large_state_training_data[, lasso_prediction := predict(large_state_NOoffset_lasso_model, large_state_training_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+)]
+
+large_state_penalized_coeff_table <- create_coeff_table(
+  unpenalized_model = large_state_glm_model,
+  penalized_model = large_state_NOoffset_lasso_model
+)
+
+print(large_state_penalized_coeff_table)
+print(summary(large_state_glm_model))
+
+```
+
+Data manipulation for plotting
+
+```{r}
+
+# Preparing the data for plotting
+data <- data.frame(
+  lambda = large_state_NOoffset_lasso_model$lambda,
+  cvm = large_state_NOoffset_lasso_model$cvm,
+  cvsd = large_state_NOoffset_lasso_model$cvsd
+)
+data$cvlower = data$cvm - data$cvsd
+data$cvupper = data$cvm + data$cvsd
+
+# Plotting
+ggplot(data, aes(x = lambda, y = cvm)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = cvlower, ymax = cvupper), alpha = 0.2) +
+  labs(x = "Lambda", y = "Mean Cross-Validated Error for Large state") +
+  theme_minimal()
+```
+
+Create relativity plots for the large state data. 
+
+```{r}
+if(TRUE){
+  
+# Full Model Prediction Plots and Relativity Plots
+relativity_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "industry_code"))
+prediction_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "industry_code"))
+relativity_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "MultiPolicy"))
+prediction_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "MultiPolicy"))
+relativity_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "xTreme_TurnSignal"))
+prediction_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "xTreme_TurnSignal"))
+
+## Car Weight Lasso GLM Plot
+# Figure 7.14
+relativity_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "car_weight"))
+prediction_plot(get_cat_var_table(large_state_training_data, large_state_penalized_coeff_table, "car_weight"))
+
+# Get tables for continuous variables.
+driver_age_table_ls_penalized <- get_driver_var_table(large_state_training_data, large_state_penalized_coeff_table, variable_name = "driver_age")
+vehicle_age_table_ls_penalized <- get_vehicle_var_table(large_state_training_data, large_state_penalized_coeff_table, variable_name = "vehicle_age")
+
+# Full Model Continuous Prediction Plots and Relativity Plots
+
+## Driver Age Lasso GLM Plot
+# Figure 7.12
+relativity_plot(driver_age_table_ls_penalized)
+prediction_plot(driver_age_table_ls_penalized)
+
+## Vehicle Age Lasso GLM Plot
+# Figure 7.13
+relativity_plot(vehicle_age_table_ls_penalized)
+prediction_plot(vehicle_age_table_ls_penalized)
+
+## Large State GLM Double Lift Chart With NonCredible Vars
+# Figure 7.15
+double_lift_chart(
+  dataset = large_state_training_data,
+  lasso_credibility = "lasso_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+double_lift_chart(
+  dataset = large_state_validate_data,
+  lasso_credibility = "lasso_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+  
+}
+```
+
+Since various GLM coefficients have high P-values, we will remove them and re-compare our models. 
+
+```{r}
+
+
+# Remove insignificant variables.
+large_state_training_data[, industry_no_healthcare := industry_code]
+large_state_training_data[industry_code == "ind_health_care", industry_no_healthcare := "ind_education"]
+table(large_state_training_data$industry_no_healthcare)
+
+# Fit the GLM model without an offset
+large_state_glm_model_significant <- glm(
+  formula = incurred_loss ~
+    driver_age_18_38_hinge + driver_age_38_76_hinge +
+    vehicle_age_0_10_hinge +
+    C(MultiPolicy) + C(xTreme_TurnSignal) + C(car_weight) + C(industry_no_healthcare),
+  family = tweedie(1.6, link.power = 0),
+  weights = exposure,
+  # offset = cw_model_complement_of_credibility_vector, - Note, no complement here.
+  data = large_state_training_data
+)
+
+large_state_training_data[, glm_prediction_significant := predict.glm(large_state_glm_model_significant, large_state_training_data, type = "response")]
+
+
+# Removing insignificant variables, Lasso is comparable or better than the GLM prediction.
+# especially in the first and last deciles.
+
+## Large State Double Lift Remove Insignificant Vars
+# Figure 7.16
+double_lift_chart(
+  dataset = large_state_training_data,
+  lasso_credibility = "lasso_prediction",
+  glm = "glm_prediction_significant",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+
+```
+
+Now, we will fit the lasso credibility model to compare it to the GLM. 
+
+```{r}
+
+recompute <- TRUE
+
+if (recompute) {
+# fit the lasso model with an offset
+large_state_offset_lasso_model <- cv.HDtweedie(
+  x = large_state_training_data_matrix,
+  y = (large_state_training_loss_vector * (cw_model_complement_of_credibility_vector^(1 - 1.6)) / (cw_model_complement_of_credibility_vector^(2 - 1.6))),
+  group = NULL, p = 1.6,
+  weights = large_state_training_data$exposure * (cw_model_complement_of_credibility_vector^(2 - 1.6)), lambda = NULL,
+  pred.loss = "deviance",
+  nfolds = 4, foldid = large_state_training_cv_vector,
+  standardize = TRUE
+)
+
+  saveRDS(large_state_offset_lasso_model, file = "large_state_offset_lasso_model.rds")
+} else {
+  large_state_offset_lasso_model <- readRDS("large_state_offset_lasso_model.rds")
+}
+
+
+large_state_training_data[, credibility_weighted_prediction := predict(large_state_offset_lasso_model, large_state_training_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+large_state_validate_data[, credibility_weighted_prediction := predict(large_state_offset_lasso_model, large_state_validate_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+large_state_credibility_coeff_table <- create_credibility_coeff_table(
+  glm_model = large_state_glm_model,
+  penalized_model = large_state_offset_lasso_model,
+  complement_model = lasso_model
+)
+
+
+coef(large_state_offset_lasso_model, s = c("lambda.min"))
+coef_lasso <- coef(large_state_offset_lasso_model, s = "lambda.min")
+coef_df <- as.data.frame(coef_lasso[-1, , drop = FALSE])
+names(coef_df)[1] <- "Coefficient"
+coef_df$abs_coefficient <- abs(coef_df$Coefficient)
+coef_df_sorted <- coef_df[order(coef_df$abs_coefficient, decreasing = TRUE), ]
+
+coef_df_sorted$abs_coefficient <- NULL
+print(coef_df_sorted)
+```
+
+Create various plots to compare our lasso credibility model to the GLM. 
+
+```{r}
+
+# Preparing the data for plotting
+data <- data.frame(
+  lambda = large_state_offset_lasso_model$lambda,
+  cvm = large_state_offset_lasso_model$cvm,
+  cvsd = large_state_offset_lasso_model$cvsd
+)
+data$cvlower = data$cvm - data$cvsd
+data$cvupper = data$cvm + data$cvsd
+
+# Plotting
+ggplot(data, aes(x = lambda, y = cvm)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = cvlower, ymax = cvupper), alpha = 0.2) +
+  labs(x = "Lambda", y = "Mean Cross-Validated Error for Large state") +
+  theme_minimal()
+```
+```{r}
+if(FALSE){
+  # This section compares the GLM vs. the Lasso with a complement of credibility on the large state data
+
+# Large State Industry Code Relativity Plot
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "industry_code"))
+
+# Large State Industry Coeff Subset
+capture.output(summary(large_state_glm_model))[c(13, 14, 30, 32, 33, 34, 35, 36)]
+
+# Large State Car Weight xTreme Coeff Subset
+capture.output(summary(large_state_glm_model))[c(13, 14, 23, 24, 25, 35, 36)]
+
+# Large State xTreme Turn Signal Relativity Plot
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "xTreme_TurnSignal"))
+
+# Large State Car Weight Relativity Plot
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "car_weight"))
+
+# Large State Relativity Plot Driver Age
+# credibility_prediction_plot(large_state_driver_age_table)
+
+# Large State Credibility Coeff Table
+print(large_state_credibility_coeff_table)
+summary(large_state_glm_model)
+write.csv(large_state_credibility_coeff_table, file = "../Graphs/LargeState/CSV/largestate_coeff_table.csv", row.names = FALSE)
+
+
+# Large State Categorical Prediction and Relativity Plots
+
+## Large State Construction lasso Relativity Plot
+# Figure 7.17 
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "industry_code"))
+# Figure 7.18
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "car_weight"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_training_data, large_state_credibility_coeff_table, "car_weight"))
+
+large_state_driver_age_table <- get_credibility_driver_var_table(large_state_training_data, large_state_credibility_coeff_table, variable_name = "driver_age")
+large_state_vehicle_age_table <- get_credibility_vehicle_var_table(large_state_training_data, large_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+# Large State Continuous Prediction and Relativity Plots
+# Update script to produce zoomed in relativities
+# Figure 7.19
+credibility_relativity_plot(large_state_driver_age_table)
+credibility_prediction_plot(large_state_driver_age_table)
+# Figure 7.20
+credibility_relativity_plot(large_state_vehicle_age_table)
+credibility_prediction_plot(large_state_vehicle_age_table)
+
+# Validation set
+# add the predictions to our holdout data and create charts as before
+large_state_validate_data[, glm_prediction := predict.glm(large_state_glm_model, large_state_validate_data, type = "response")]
+large_state_validate_data[, credibility_weighted_prediction := predict(large_state_offset_lasso_model, large_state_validate_data_matrix, s = "lambda.min") * large_state_validate_data$cw_model_complement_of_credibility]
+
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_validate_data, large_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_validate_data, large_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_validate_data, large_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(large_state_validate_data, large_state_credibility_coeff_table, "car_weight"))
+
+large_state_driver_age_table <- get_credibility_driver_var_table(large_state_validate_data, large_state_credibility_coeff_table, variable_name = "driver_age")
+large_state_vehicle_age_table <- get_credibility_vehicle_var_table(large_state_validate_data, large_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+credibility_prediction_plot(large_state_driver_age_table)
+credibility_prediction_plot(large_state_vehicle_age_table)
+
+# Lift Charts for Large State
+
+
+## Large State Lasso Credibility vs. GLM
+# Figure 7.21
+double_lift_chart(
+  dataset = large_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+
+## Large State Lasso Credibility vs. Lasso Penalization
+# Figure 7.22
+double_lift_chart(
+  dataset = large_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "lasso_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+double_lift_chart(
+  dataset = large_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+selected_columns <- large_state_training_data[, c("lasso_prediction", "glm_prediction", "true_risk",
+                                                  "incurred_loss", "glm_prediction_significant", "credibility_weighted_prediction")]
+write.csv(selected_columns, file = "../Graphs/LargeState/CSV/large_state_training_data_predictions.csv", row.names = FALSE)
+
+double_lift_chart(
+  dataset = large_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = large_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+print(large_state_credibility_coeff_table)
+summary(large_state_glm_model)
+```
+
+This section creates alternate models to explore what happens when we remove the complement of credibility from the Health Care and Farming inducstry codes. The results are displayed in Section 7.5.5.
+
+```{r}
+#### Vignette - remove complement of credibility from Health Care and Farming ####
+cw_model_complement_of_credibility_vector <- large_state_training_data$cw_model_complement_of_credibility
+
+# Remove the health care and real estate complements of credibility
+large_state_training_data[, complement_wo_hc_re := cw_model_complement_of_credibility]
+large_state_training_data[ind_health_care == 1, complement_wo_hc_re := complement_wo_hc_re / exp(0.33555)]
+large_state_training_data[ind_farming == 1, complement_wo_hc_re := complement_wo_hc_re / exp(-0.38591)]
+complement_wo_hc_re <- large_state_training_data$complement_wo_hc_re
+
+large_state_alternate_lasso_model <- cv.HDtweedie(
+  x = large_state_training_data_matrix,
+  y = (large_state_training_loss_vector * (complement_wo_hc_re^(1 - 1.6)) / (complement_wo_hc_re^(2 - 1.6))),
+  group = NULL, p = 1.6,
+  weights = large_state_training_data$exposure * (complement_wo_hc_re^(2 - 1.6)), lambda = NULL,
+  pred.loss = "deviance",
+  nfolds = 4, foldid = large_state_training_cv_vector,
+  standardize = TRUE
+)
+
+coef(large_state_alternate_lasso_model, s = c("lambda.min"))
+
+}
+```
+
+

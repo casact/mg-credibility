@@ -1,0 +1,818 @@
+---
+title: "Case Study Setup"
+output: html_document
+date: "2023-12-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Generate Data
+
+In this section, we will generate the data needed for the rest of the case study.
+At the end of the file, we will also generate the first GLM to be used as our complement of credibility and append the prediction to this data.
+We encourage you to save this data locally to avoid needing to resimulate it when proceeding with the case study.
+
+First, we install the necessary packages for the case study.
+A check for these packages is made at the beginning of future Rmd files, so no need to save this list for later.
+
+```{r packages, echo=FALSE, include=FALSE}
+# Function to install and load packages
+install_and_load <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+# List of packages
+packages <- c("data.table", "statmod", "ggplot2", "tweedie", 
+              "glmnet", "HDtweedie", "plotly", "arrow", "knitr")
+
+# Install and load all packages
+sapply(packages, install_and_load)
+
+```
+
+Now, we will define "true relativities" for variables in our base modeling dataset.
+We are using an exponential shape to make it easy for our variable transformations to exactly match the true relativities.
+
+```{r, echo=FALSE, include=FALSE}
+
+driver_age_table <- data.table(
+  "driver_age" = 18:100,
+  "true_driver_age_relativity" = c(1.05^(20:1), c((.9^(1 / 39))^(0:39)), .9 * (1.01^(1:23)))
+)
+vehicle_age_table <- data.table(
+  "vehicle_age" = 0:19,
+  "true_vehicle_age_relativity" = c(1.03^(10:0), 1.01^(-1:-9))
+)
+even_category_table <- data.table(
+  "even_category" = 0:1, "true_MultiPolicy_relativity" = (c(1, .8)),
+  "MultiPolicy" = c("multi_no", "multi_yes")
+)
+small_category_table <- data.table(
+  "small_category" = 0:1, "true_xTreme_TurnSignal_relativity" = c(1, .2),
+  "xTreme_TurnSignal" = c("xTreme_no", "xTreme_yes")
+)
+four_category_table <- data.table(
+  "four_categories" = 0:3, "true_car_weight_relativity" = c(.7, 1, 1.2, 1.2),
+  "car_weight" = c(
+    "weight_heavy", "weight_medium",
+    "weight_light", "weight_extra_light"
+  )
+)
+ten_category_table <- data.table(
+  "ten_categories" = 0:9, "true_industry_code_relativity" =
+    c(1.3, .8, .5, 1, .9, 1.2, 1.5, .7, .6, 2),
+  "industry_code" = c(
+    "ind_health_care", "ind_retail", "ind_finance_and_insurance",
+    "ind_education", "ind_fine_arts", "ind_food_services",
+    "ind_construction", "ind_farming", "ind_real_estate",
+    "ind_fireworks"
+  )
+)
+```
+
+This is the same process, but for the large state data.
+Differences from the base modeling data are noted through comments in the code.
+
+```{r, echo=FALSE, include=FALSE}
+
+
+# In this large state, the driver age relativity is steeper in the beginning and flat in the end.
+# 1.05^(20:1) changed to 1.07^(20:1)
+large_state_driver_age_table <- data.table(
+  "driver_age" = 18:100,
+  "true_driver_age_relativity" = c(
+    1.06^(20:1), c((.9^(1 / 39))^(0:39)),
+    .9 * (1.003^(1:23))
+  )
+)
+
+# vehicle age in this large state remains the same
+large_state_vehicle_age_table <- data.table(
+  "vehicle_age" = 0:19,
+  "true_vehicle_age_relativity" = c(1.03^(10:0), 1.01^(-1:-9))
+)
+
+# Multi-Policy Discount has a slightly larger discount here.
+# Discount changed from .8 to .75
+large_state_even_category_table <- data.table(
+  "even_category" = 0:1, "true_MultiPolicy_relativity" = (c(1, .7)),
+  "MultiPolicy" = c("multi_no", "multi_yes")
+)
+
+# people are using the xTreme TurnSignal slightly less effectively in this state
+# discount changed from .2 to .4
+large_state_small_category_table <- data.table(
+  "small_category" = 0:1, "true_xTreme_TurnSignal_relativity" = c(1, .4),
+  "xTreme_TurnSignal" = c("xTreme_no", "xTreme_yes")
+)
+
+# Light trucks have a better relativity, and extra_light cars perform much worse in this state
+# 1.2 to 1.15, 1.2 to 1.3
+large_state_four_category_table <- data.table(
+  "four_categories" = 0:3, "true_car_weight_relativity" =
+    c(.7, 1, 1.15, 1.3),
+  "car_weight" = c(
+    "weight_heavy", "weight_medium",
+    "weight_light", "weight_extra_light"
+  )
+)
+
+# Health Care performs better 1.3 to 1.2
+# Fireworks performs even worse 2 to 2.5
+# Construction performs better 1.5 to 1.4
+large_state_ten_category_table <- data.table(
+  "ten_categories" = 0:9, "true_industry_code_relativity" =
+    c(1.2, .8, .5, 1, .9, 1.2, 1.4, .7, .6, 3),
+  "industry_code" = c(
+    "ind_health_care", "ind_retail",
+    "ind_finance_and_insurance",
+    "ind_education", "ind_fine_arts",
+    "ind_food_services", "ind_construction",
+    "ind_farming", "ind_real_estate",
+    "ind_fireworks"
+  )
+)
+
+```
+
+This is the same process, but for the medium state data.
+Differences from the base modeling data are noted through comments in the code.
+
+```{r medium-state, echo=FALSE, include=FALSE}
+
+# In this medium state, the driver age relativity is less steep in the beginning and decreases in the end.
+# 1.05^(20:1) changed to 1.03^(20:1)
+# 1.01^(1:23) changed to 1.01^(-1:-23)
+medium_state_driver_age_table <- data.table(
+  "driver_age" = 18:100,
+  "true_driver_age_relativity" = c(
+    1.03^(20:1), c((.9^(1 / 39))^(0:39)),
+    .9 * (1.01^(-1:-23))
+  )
+)
+
+# vehicle age in this medium state decreases faster in the tail
+# 1.01^(-1:-9) changed to
+medium_state_vehicle_age_table <- data.table(
+  "vehicle_age" = 0:19,
+  "true_vehicle_age_relativity" = c(1.03^(10:0), 1.02^(-1:-9))
+)
+
+# Multi-Policy Discount has a slightly smaller discount here.
+# Discount changed from .8 to .75
+medium_state_even_category_table <- data.table(
+  "even_category" = 0:1, "true_MultiPolicy_relativity" = (c(1, .75)),
+  "MultiPolicy" = c("multi_no", "multi_yes")
+)
+
+# people are using the xTreme TurnSignal slightly less effectively in this state
+# discount changed from .2 to .5
+medium_state_small_category_table <- data.table(
+  "small_category" = 0:1, "true_xTreme_TurnSignal_relativity" = c(1, .5),
+  "xTreme_TurnSignal" = c("xTreme_no", "xTreme_yes")
+)
+
+# Light vehicles have a worse relativity, and extra_light vehicles perform worse as well
+# 1.2 to 1.3, 1.2 to 1.4
+medium_state_four_category_table <- data.table(
+  "four_categories" = 0:3, "true_car_weight_relativity" =
+    c(.7, 1, 1.3, 1.4),
+  "car_weight" = c(
+    "weight_heavy", "weight_medium",
+    "weight_light", "weight_extra_light"
+  )
+)
+
+# Retail performs better in this state .8 to .7
+# Fireworks performs better 2 to 1.5
+# Fine arts are riskier .9 to 1.1
+medium_state_ten_category_table <- data.table(
+  "ten_categories" = 0:9, "true_industry_code_relativity" =
+    c(1.3, .7, .5, 1, 1.1, 1.2, 1.5, .7, .6, 1.5),
+  "industry_code" = c(
+    "ind_health_care", "ind_retail",
+    "ind_finance_and_insurance",
+    "ind_education", "ind_fine_arts",
+    "ind_food_services", "ind_construction",
+    "ind_farming", "ind_real_estate",
+    "ind_fireworks"
+  )
+)
+
+```
+
+This is the same process, but for the first small state data.
+Differences from the base modeling data are noted through comments in the code.
+
+```{r small-state, echo=FALSE, include=FALSE}
+
+# This small state is different than the countrywide data (Unlike the next small state)
+
+# Continues to decrease in the tail
+small_state_driver_age_table <- data.table(
+  "driver_age" = 18:100,
+  "true_driver_age_relativity" = c(1.05^(20:1), c((.9^(1 / 39))^(0:62)))
+)
+
+# Steeper Driver Age
+small_state_vehicle_age_table <- data.table(
+  "vehicle_age" = 0:19,
+  "true_vehicle_age_relativity" = c(1.04^(10:0), 1.01^(-1:-9))
+)
+
+# Not as much of a discount for multi-policy category: yes
+small_state_even_category_table <- data.table(
+  "even_category" = 0:1, "true_MultiPolicy_relativity" = (c(1, .6)),
+  "MultiPolicy" = c("multi_no", "multi_yes")
+)
+
+# Turn Signal is not as effective in this state.
+small_state_small_category_table <- data.table(
+  "small_category" = 0:1, "true_xTreme_TurnSignal_relativity" = c(1, .6),
+  "xTreme_TurnSignal" = c("xTreme_no", "xTreme_yes")
+)
+
+# extra light is more risky.
+# heavy is only slightly less risky.
+small_state_four_category_table <- data.table(
+  "four_categories" = 0:3, "true_car_weight_relativity" = c(.8, 1, 1.2, 2),
+  "car_weight" = c(
+    "weight_heavy", "weight_medium",
+    "weight_light", "weight_extra_light"
+  )
+)
+
+# health_care is at the 1.0 relativity
+# Real estate is slightly more risky
+# food services is slightly less risky
+small_state_ten_category_table <- data.table(
+  "ten_categories" = 0:9, "true_industry_code_relativity" =
+    c(1.4, .8, .5, 1, .9, 1.1, 1.5, .7, .7, 2),
+  "industry_code" = c(
+    "ind_health_care", "ind_retail",
+    "ind_finance_and_insurance",
+    "ind_education", "ind_fine_arts",
+    "ind_food_services", "ind_construction",
+    "ind_farming", "ind_real_estate",
+    "ind_fireworks"
+  )
+)
+
+```
+
+Let's create a chart to compare the state differences between the driver age factors (Figure 7.2)...
+
+```{r driver age, include=FALSE}
+
+driver_age_table
+large_state_driver_age_table
+medium_state_driver_age_table
+small_state_driver_age_table
+
+# Assuming you have the four tables: driver_age_table, large_state_driver_age_table, 
+# medium_state_driver_age_table, small_state_driver_age_table
+
+# Merging and renaming columns
+merged_table <- merge(driver_age_table, large_state_driver_age_table, by = "driver_age")
+names(merged_table)[names(merged_table) == "true_driver_age_relativity.y"] <- "large"
+names(merged_table)[names(merged_table) == "true_driver_age_relativity.x"] <- "full"
+
+merged_table <- merge(merged_table, medium_state_driver_age_table, by = "driver_age")
+names(merged_table)[names(merged_table) == "true_driver_age_relativity"] <- "medium"
+
+merged_table <- merge(merged_table, small_state_driver_age_table, by = "driver_age")
+names(merged_table)[names(merged_table) == "true_driver_age_relativity"] <- "small"
+
+# Plotting
+library(ggplot2)
+
+ggplot(merged_table, aes(x = driver_age)) + 
+    geom_line(aes(y = full, colour = "Full")) +
+    geom_line(aes(y = large, colour = "Large")) +
+    geom_line(aes(y = medium, colour = "Medium")) +
+    geom_line(aes(y = small, colour = "Small")) +
+    labs(title = "Driver Age Relativity by State Size",
+         x = "Driver Age", 
+         y = "True Driver Age Relativity") +
+    theme_minimal()
+
+
+```
+
+... and the vehicle age factors (Figure 7.3)...
+
+```{r vehicle_age , include=FALSE}
+
+
+# Assuming you have the four tables: driver_age_table, large_state_driver_age_table, 
+# medium_state_driver_age_table, small_state_driver_age_table
+
+# Merging and renaming columns
+merged_table <- merge(vehicle_age_table, large_state_vehicle_age_table, by = "vehicle_age")
+names(merged_table)[names(merged_table) == "true_vehicle_age_relativity.y"] <- "large"
+names(merged_table)[names(merged_table) == "true_vehicle_age_relativity.x"] <- "full"
+
+merged_table <- merge(merged_table, medium_state_vehicle_age_table, by = "vehicle_age")
+names(merged_table)[names(merged_table) == "true_vehicle_age_relativity"] <- "medium"
+
+merged_table <- merge(merged_table, small_state_vehicle_age_table, by = "vehicle_age")
+names(merged_table)[names(merged_table) == "true_vehicle_age_relativity"] <- "small"
+
+# Plotting
+library(ggplot2)
+
+ggplot(merged_table, aes(x = vehicle_age)) + 
+    geom_line(aes(y = full, colour = "Full")) +
+    geom_line(aes(y = large, colour = "Large")) +
+    geom_line(aes(y = medium, colour = "Medium")) +
+    geom_line(aes(y = small, colour = "Small")) +
+    labs(title = "Driver Age Relativity by State Size",
+         x = "Driver Age", 
+         y = "True Driver Age Relativity") +
+    theme_minimal()
+
+
+```
+
+... and the industry code factors (Figure 7.7.
+
+```{r ten_category age, echo=FALSE, include=FALSE}
+
+copied_ten_category_table <- copy(ten_category_table)
+copied_ten_category_table[, ten_categories := NULL]
+
+copied_large_state_ten_category_table <- copy(large_state_ten_category_table)
+copied_large_state_ten_category_table[, ten_categories := NULL]
+
+copied_medium_state_ten_category_table <- copy(medium_state_ten_category_table)
+copied_medium_state_ten_category_table[, ten_categories := NULL]
+
+copied_small_state_ten_category_table <- copy(small_state_ten_category_table)
+copied_small_state_ten_category_table[, ten_categories := NULL]
+
+# Assuming you have the four tables: ten_category_table, large_state_ten_category_table, 
+# medium_state_ten_category_table, small_state_ten_category_table
+
+# Merging and renaming columns
+merged_table <- merge(copied_ten_category_table, copied_large_state_ten_category_table, by = "industry_code")
+names(merged_table)[names(merged_table) == "true_industry_code_relativity.y"] <- "large"
+names(merged_table)[names(merged_table) == "true_industry_code_relativity.x"] <- "full"
+
+merged_table <- merge(merged_table, copied_medium_state_ten_category_table, by = "industry_code")
+names(merged_table)[names(merged_table) == "true_industry_code_relativity"] <- "medium"
+
+merged_table <- merge(merged_table, copied_small_state_ten_category_table, by = "industry_code")
+names(merged_table)[names(merged_table) == "true_industry_code_relativity"] <- "small"
+
+merged_table
+```
+
+We can start now simulating the data.
+Here is where we set the seed for our data simulation.
+
+First the base modeling data...
+
+```{r large state, echo=FALSE}
+
+# Set the size of the various modeling datasets
+nrow_base_modeling_data <- 2500000
+nrow_large_state_modeling_data <- 500000
+nrow_medium_state_modeling_data <- 300000
+nrow_small_state_modeling_data <- 100000
+nrow_small_cw_dist_state_modeling_data <- 100000
+
+# This seed will make the data reproducable and match the case study
+set.seed(99999)
+
+base_modeling_data <- data.table(
+  "driver_age" = round(rbeta(nrow_base_modeling_data, 2, 3) * 95 + 14, 0),
+  "vehicle_age" = round(rbeta(nrow_base_modeling_data, 2, 5) * 20, 0),
+  "even_category" = round(rbeta(nrow_base_modeling_data, 3, 3), 0),
+  "small_category" = round(rbeta(nrow_base_modeling_data, 2, 7), 0),
+  "four_categories" = round(rbeta(nrow_base_modeling_data, 3, 4) * 3, 0),
+  "ten_categories" = round(rbeta(nrow_base_modeling_data, 3, 6) * 10, 0),
+  "noise_factor" = rbeta(nrow_base_modeling_data, 4, 5) + .5,
+  "subset" = "base_data",
+  "stratification" = sample.int(5, nrow_base_modeling_data, replace = TRUE),
+  "loss_cost" = 500
+)
+
+base_modeling_data[driver_age > 100, driver_age := 100]
+base_modeling_data[driver_age %in% c(14, 15), driver_age := 19]
+base_modeling_data[driver_age %in% c(16, 17), driver_age := 18]
+
+base_modeling_data[vehicle_age > 20, vehicle_age := 20]
+#
+# hist(round(rbeta(nrow_base_modeling_data,2,3)*86+14,0))
+min(round(rbeta(nrow_base_modeling_data, 2, 3) * 95 + 14, 0))
+max(round(rbeta(nrow_base_modeling_data, 2, 3) * 95 + 14, 0))
+# Take a look at the base modeling data.
+head(base_modeling_data)
+nrow(base_modeling_data)
+
+
+# Make a list to merge the tables together
+base_factor_tables <- list(
+  driver_age_table, vehicle_age_table,
+  even_category_table, small_category_table,
+  four_category_table, ten_category_table
+)
+
+# Merge the tables together using a for-loop.
+for (table in base_factor_tables) {
+  base_modeling_data <- merge.data.table(base_modeling_data, table, by = colnames(table)[1])
+}
+# check that they were merged correctly
+head(base_modeling_data)
+nrow(base_modeling_data)
+
+```
+
+... then large stat data ...
+
+```{r, echo=FALSE, include=FALSE}
+
+# Now, we will perform all of these same operations for a large state subset
+
+large_state_modeling_data <- data.table(
+  "driver_age" = round(rbeta(nrow_large_state_modeling_data, 2, 3) * 95 + 14, 0),
+  "vehicle_age" = round(rbeta(nrow_large_state_modeling_data, 2, 5) * 25, 0),
+  "even_category" = round(rbeta(nrow_large_state_modeling_data, 3, 3), 0),
+  "small_category" = round(rbeta(nrow_large_state_modeling_data, 2, 7), 0),
+  "four_categories" = round(rbeta(nrow_large_state_modeling_data, 3, 4) * 3, 0),
+  "ten_categories" = round(rbeta(nrow_large_state_modeling_data, 3, 6) * 10, 0),
+  "noise_factor" = rbeta(nrow_large_state_modeling_data, 4, 5) + .5,
+  "subset" = "large_state",
+  "stratification" = sample.int(5, nrow_large_state_modeling_data,
+    replace = TRUE
+  ),
+  "loss_cost" = 800
+)
+
+large_state_modeling_data[driver_age > 100, driver_age := 100]
+base_modeling_data[driver_age %in% c(14, 15), driver_age := 19]
+base_modeling_data[driver_age %in% c(16, 17), driver_age := 18]
+large_state_modeling_data[vehicle_age > 20, vehicle_age := 20]
+head(large_state_modeling_data)
+
+# Again, list and merge the tables
+large_state_factor_tables <- list(
+  large_state_driver_age_table, large_state_vehicle_age_table,
+  large_state_even_category_table, large_state_small_category_table,
+  large_state_four_category_table, large_state_ten_category_table
+)
+
+for (table in large_state_factor_tables) {
+  large_state_modeling_data <- merge.data.table(large_state_modeling_data, table, by = colnames(table)[1])
+}
+head(large_state_modeling_data)
+nrow(large_state_modeling_data)
+
+
+```
+
+... medium state data ...
+
+```{r medium-gen, echo=FALSE, include=FALSE}
+# Now, we will perform all of these same operations for a medium state subset
+
+medium_state_modeling_data <- data.table(
+  "driver_age" = round(rbeta(nrow_medium_state_modeling_data, 2, 3) * 95 + 14, 0),
+  "vehicle_age" = round(rbeta(nrow_medium_state_modeling_data, 2, 5) * 25, 0),
+  "even_category" = round(rbeta(nrow_medium_state_modeling_data, 3, 3), 0),
+  "small_category" = round(rbeta(nrow_medium_state_modeling_data, 2, 7), 0),
+  "four_categories" = round(rbeta(nrow_medium_state_modeling_data, 3, 4) * 3, 0),
+  "ten_categories" = round(rbeta(nrow_medium_state_modeling_data, 3, 6) * 10, 0),
+  "noise_factor" = rbeta(nrow_medium_state_modeling_data, 4, 5) + .5,
+  "subset" = "medium_state",
+  "stratification" = sample.int(5, nrow_medium_state_modeling_data,
+    replace = TRUE
+  ),
+  "loss_cost" = 450
+)
+
+medium_state_modeling_data[driver_age > 100, driver_age := 100]
+base_modeling_data[driver_age %in% c(14, 15), driver_age := 19]
+base_modeling_data[driver_age %in% c(16, 17), driver_age := 18]
+medium_state_modeling_data[vehicle_age > 20, vehicle_age := 20]
+
+head(medium_state_modeling_data)
+
+
+medium_state_factor_tables <- list(
+  medium_state_driver_age_table, medium_state_vehicle_age_table,
+  medium_state_even_category_table, medium_state_small_category_table,
+  medium_state_four_category_table, medium_state_ten_category_table
+)
+
+for (table in medium_state_factor_tables) {
+  medium_state_modeling_data <- merge.data.table(medium_state_modeling_data, table, by = colnames(table)[1])
+}
+head(medium_state_modeling_data)
+
+```
+
+... and small state data.
+
+```{r small-state-gen, echo=FALSE, include=FALSE}
+
+# Now, we will perform all of these same operations for a small state subset
+
+small_state_modeling_data <- data.table(
+  "driver_age" = round(rbeta(nrow_small_state_modeling_data, 2, 3) * 95 + 14, 0),
+  "vehicle_age" = round(rbeta(nrow_small_state_modeling_data, 2, 5) * 25, 0),
+  "even_category" = round(rbeta(nrow_small_state_modeling_data, 3, 3), 0),
+  "small_category" = round(rbeta(nrow_small_state_modeling_data, 2, 7), 0),
+  "four_categories" = round(rbeta(nrow_small_state_modeling_data, 3, 4) * 3, 0),
+  "ten_categories" = round(rbeta(nrow_small_state_modeling_data, 3, 6) * 10, 0),
+  "noise_factor" = rbeta(nrow_small_state_modeling_data, 4, 5) + .5,
+  "subset" = "small_state",
+  "stratification" = sample.int(5, nrow_small_state_modeling_data,
+    replace = TRUE
+  ),
+  "loss_cost" = 400
+)
+small_state_modeling_data[driver_age > 100, driver_age := 100]
+base_modeling_data[driver_age %in% c(14, 15), driver_age := 19]
+base_modeling_data[driver_age %in% c(16, 17), driver_age := 18]
+small_state_modeling_data[vehicle_age > 20, vehicle_age := 20]
+head(small_state_modeling_data)
+
+
+small_state_factor_tables <- list(
+  small_state_driver_age_table, small_state_vehicle_age_table,
+  small_state_even_category_table, small_state_small_category_table,
+  small_state_four_category_table, small_state_ten_category_table
+)
+
+for (table in small_state_factor_tables) {
+  small_state_modeling_data <- merge.data.table(small_state_modeling_data, table, by = colnames(table)[1])
+}
+head(small_state_modeling_data)
+
+
+```
+
+Additionally, let's generate a second small state data set with the same true risk relativities as the larger modeling data set.
+
+```{r gen-small-state-2, echo=FALSE, include=FALSE}
+
+# Now, we will perform all of these same operations for a small state subset.
+# Here, all relativities are identical to our base_modeling_data subset
+
+small_cw_dist_state_modeling_data <- data.table(
+  "driver_age" = round(rbeta(nrow_small_cw_dist_state_modeling_data, 2, 3) * 95 + 14, 0),
+  "vehicle_age" = round(rbeta(nrow_small_cw_dist_state_modeling_data, 2, 5) * 25, 0),
+  "even_category" = round(rbeta(nrow_small_cw_dist_state_modeling_data, 3, 3), 0),
+  "small_category" = round(rbeta(nrow_small_cw_dist_state_modeling_data, 2, 7), 0),
+  "four_categories" = round(rbeta(nrow_small_cw_dist_state_modeling_data, 3, 4) * 3, 0),
+  "ten_categories" = round(rbeta(nrow_small_cw_dist_state_modeling_data, 3, 6) * 10, 0),
+  "noise_factor" = rbeta(nrow_small_cw_dist_state_modeling_data, 4, 5) + .5,
+  "subset" = "small_cw_dist_state",
+  "stratification" = sample.int(5, nrow_small_cw_dist_state_modeling_data, replace = TRUE),
+  "loss_cost" = 500
+)
+
+
+small_cw_dist_state_modeling_data[driver_age > 100, driver_age := 100]
+base_modeling_data[driver_age %in% c(14, 15), driver_age := 19]
+base_modeling_data[driver_age %in% c(16, 17), driver_age := 18]
+small_cw_dist_state_modeling_data[vehicle_age > 20, vehicle_age := 20]
+
+# This small state is identical to the base modeling data
+
+small_cw_dist_state_driver_age_table <- data.table(
+  "driver_age" = 18:100,
+  "true_driver_age_relativity" = c(
+    1.05^(20:1),
+    c((.9^(1 / 39))^(0:39)),
+    .9 * (1.01^(1:23))
+  )
+)
+
+small_cw_dist_state_vehicle_age_table <- data.table(
+  "vehicle_age" = 0:19,
+  "true_vehicle_age_relativity" = c(1.03^(10:0), 1.015^(-1:-9))
+)
+
+small_cw_dist_state_even_category_table <- data.table(
+  "even_category" = 0:1,
+  "true_MultiPolicy_relativity" = (c(1, .8)),
+  "MultiPolicy" = c("multi_no", "multi_yes")
+)
+
+small_cw_dist_state_small_category_table <- data.table(
+  "small_category" = 0:1,
+  "true_xTreme_TurnSignal_relativity" = c(1, .2),
+  "xTreme_TurnSignal" = c("xTreme_no", "xTreme_yes")
+)
+
+small_cw_dist_state_four_category_table <- data.table(
+  "four_categories" = 0:3,
+  "true_car_weight_relativity" = c(.7, 1, 1.2, 1.2),
+  "car_weight" = c(
+    "weight_heavy", "weight_medium",
+    "weight_light", "weight_extra_light"
+  )
+)
+
+small_cw_dist_state_ten_category_table <- data.table(
+  "ten_categories" = 0:9, "true_industry_code_relativity" =
+    c(1.3, .8, .5, 1, .9, 1.2, 1.5, .7, .6, 2),
+  "industry_code" = c(
+    "ind_health_care", "ind_retail",
+    "ind_finance_and_insurance",
+    "ind_education", "ind_fine_arts",
+    "ind_food_services", "ind_construction",
+    "ind_farming", "ind_real_estate",
+    "ind_fireworks"
+  )
+)
+
+small_cw_dist_state_factor_tables <- list(
+  small_cw_dist_state_driver_age_table,
+  small_cw_dist_state_vehicle_age_table,
+  small_cw_dist_state_even_category_table,
+  small_cw_dist_state_small_category_table,
+  small_cw_dist_state_four_category_table,
+  small_cw_dist_state_ten_category_table
+)
+
+for (table in small_cw_dist_state_factor_tables) {
+  small_cw_dist_state_modeling_data <- merge.data.table(small_cw_dist_state_modeling_data, table, by = colnames(table)[1])
+}
+
+# Create the final overall modeling dataset
+modeling_data <- rbind(
+  base_modeling_data,
+  large_state_modeling_data,
+  medium_state_modeling_data,
+  small_state_modeling_data,
+  small_cw_dist_state_modeling_data
+)
+
+
+
+
+```
+
+We now have a full modeling dataset with all of the characteristics and true risk relativities.
+It is now time to compute the overall true risk (as multiplication of relativities and loss cost) and proceed to simulate incurred losses using a tweedie distribution.
+
+```{r, echo=FALSE, include=FALSE}
+#### 2. Create variable transformations for modeling ####
+
+# set base levels for categorical variables
+modeling_data[, industry_code := relevel(as.factor(industry_code), ref = "ind_education")]
+modeling_data[, car_weight := relevel(as.factor(car_weight), ref = "weight_medium")]
+modeling_data[, xTreme_TurnSignal := relevel(as.factor(xTreme_TurnSignal), ref = "xTreme_no")]
+modeling_data[, MultiPolicy := relevel(as.factor(MultiPolicy), ref = "multi_no")]
+modeling_data[, subset := relevel(as.factor(subset), ref = "base_data")]
+
+
+# calculate true risk multiplicatively to match the selected link function
+modeling_data[, "true_risk" := loss_cost * true_driver_age_relativity * true_vehicle_age_relativity *
+  true_MultiPolicy_relativity * true_xTreme_TurnSignal_relativity *
+  true_car_weight_relativity * true_industry_code_relativity]
+
+# Simulate the incurred loss using the true risk value
+# Note that an error term is not included in this calculation
+# You could include this in a "true_risk_with_error" column to simulate a dataset with additional volatility
+modeling_data[, "incurred_loss" := rtweedie(length(true_risk), mu = true_risk, phi = 800, power = 1.6)]
+
+# See that the overall frequency is about 4%.
+# This frequency is an item that may be adjusted in future iterations
+nrow(modeling_data[incurred_loss != 0, ]) / nrow(modeling_data)
+
+# Average Risk is a bit under 700
+mean(modeling_data$true_risk)
+
+# We can see that the means are close, but as expected, there are far more zero values in the incurred_loss
+summary(modeling_data$incurred_loss)
+summary(modeling_data$true_risk)
+
+# To simplify this case study, all exposures will be one. If this is set to a different value, our incurred_loss would need to be recalculated to reflect the fact that the true risk would be lower for partial policy terms.
+
+modeling_data[, "exposure" := 1]
+```
+
+Because we know the true distribution of risk in the underlying dataset, we can use the "perfect" feature engineering in each model.
+We will use this for our
+
+This simplification is necessary to focus on the behavior of lasso credibility and not the individual feature engineering of each model.
+It is true that this is not the best feature engeineering for each model because models describe the data - they do not describe the truth.
+However, for the sake of this case study, we will use these transformations.
+
+Models using iterative feature engineering are never "done" - we can likely always find a slightly statistically better feature engineering through iteration.
+This simplifying assumption will allow us to focus on the behavior of lasso credibility rather than this iterative process.
+Also, we will not introduce human error into this comparison by spending more time perfecting the feature engineering of one model vs. another.
+
+```{r hinges}
+
+# Create modeling hinges for driver_age
+modeling_data[, driver_age_18_38_hinge := pmin(driver_age, 38)]
+modeling_data[, driver_age_38_76_hinge := pmin(pmax(driver_age, 38), 76)]
+modeling_data[, driver_age_76_99_hinge := pmax(driver_age, 76)]
+
+#summary(modeling_data$driver_age_18_38_hinge)
+#summary(modeling_data$driver_age_38_76_hinge)
+#summary(modeling_data$driver_age_76_99_hinge)
+
+# Create modeling hinges for vehicle_age
+modeling_data[, vehicle_age_0_10_hinge := pmin(vehicle_age, 10)]
+modeling_data[, vehicle_age_10_99_hinge := pmax(vehicle_age, 10)]
+
+table(modeling_data$vehicle_age_0_10_hinge)
+table(modeling_data$vehicle_age_10_99_hinge)
+
+#summary(modeling_data$vehicle_age_0_10_hinge)
+#summary(modeling_data$vehicle_age_10_99_hinge)
+
+
+# Create one-hot encoded versions of categorical variables for penalized regression.
+# We will do this manually for clarity. There are more efficient ways to code this.
+# We will NOT create a one-hot level for the most populated variable.
+# If we included all levels of a categorical variable as one-hot encoded, it would create aliasing.
+
+# For the first two categorical variables, we already have the binary one-hot in our dataset.
+modeling_data[, multi_yes := even_category]
+modeling_data[, xTreme_yes := small_category]
+
+# For the others, we will identify the base level, and then not include that in our one-hot variables
+table(modeling_data$car_weight) # Medium is the base level
+
+modeling_data[, weight_heavy := ifelse(car_weight == "weight_heavy", 1, 0)]
+modeling_data[, weight_light := ifelse(car_weight == "weight_light", 1, 0)]
+modeling_data[, weight_extra_light := ifelse(car_weight == "weight_extra_light", 1, 0)]
+
+# Same procedure for the ten category variable "industry_code"
+table(modeling_data$industry_code) # Education is the base level
+
+modeling_data[, ind_construction := ifelse(industry_code == "ind_construction", 1, 0)]
+modeling_data[, ind_farming := ifelse(industry_code == "ind_farming", 1, 0)]
+modeling_data[, ind_finance_and_insurance := ifelse(industry_code == "ind_finance_and_insurance", 1, 0)]
+modeling_data[, ind_fine_arts := ifelse(industry_code == "ind_fine_arts", 1, 0)]
+modeling_data[, ind_fireworks := ifelse(industry_code == "ind_fireworks", 1, 0)]
+modeling_data[, ind_food_services := ifelse(industry_code == "ind_food_services", 1, 0)]
+modeling_data[, ind_health_care := ifelse(industry_code == "ind_health_care", 1, 0)]
+modeling_data[, ind_real_estate := ifelse(industry_code == "ind_real_estate", 1, 0)]
+modeling_data[, ind_retail := ifelse(industry_code == "ind_retail", 1, 0)]
+modeling_data[, ind_base_data := ifelse(subset == "base_data", 1, 0)]
+modeling_data[, ind_large_state := ifelse(subset == "large_state", 1, 0)]
+modeling_data[, ind_medium_state := ifelse(subset == "medium_state", 1, 0)]
+modeling_data[, ind_small_state := ifelse(subset == "small_state", 1, 0)]
+modeling_data[, ind_small_state_cw_dist := ifelse(subset == "small_cw_dist_state", 1, 0)]
+
+# set base levels and change to factors for GLM modeling.
+modeling_data[, industry_code := relevel(as.factor(industry_code), ref = "ind_education")]
+modeling_data[, car_weight := relevel(as.factor(car_weight), ref = "weight_medium")]
+modeling_data[, xTreme_TurnSignal := relevel(as.factor(xTreme_TurnSignal), ref = "xTreme_no")]
+modeling_data[, MultiPolicy := relevel(as.factor(MultiPolicy), ref = "multi_no")]
+modeling_data[, subset := relevel(as.factor(subset), ref = "base_data")]
+```
+
+For the purpose of reproduction we also fit the countrywide model (will be discussed in a separate Rmd file).
+This model's score is appended to the data to be used as a complement of credibility for future models.
+
+```{r fitcountrywide}
+
+training_data <- modeling_data[stratification %in% c(1, 2, 3, 4), ]
+
+# run our initial GLM model
+glm_model <- glm(
+  formula = incurred_loss ~
+    driver_age_18_38_hinge + driver_age_38_76_hinge + driver_age_76_99_hinge +
+    vehicle_age_0_10_hinge + vehicle_age_10_99_hinge +
+    C(MultiPolicy) + C(xTreme_TurnSignal) + C(car_weight) + C(industry_code) + C(subset),
+  family = tweedie(1.6, link.power = 0),
+  offset = log(exposure),
+  data = training_data
+)
+
+
+modeling_data[, cw_model_complement_of_credibility := predict.glm(glm_model, modeling_data, type = "response")]
+
+```
+
+And we finally export it.
+Change the working directory here as you want.
+
+```{r export, echo=FALSE, include=FALSE}
+
+getwd()
+#setwd()
+# Write to Parquet file
+write_parquet(modeling_data, "output_file.parquet")
+
+```
+
+```{r}
+
+
+
+```

@@ -1,0 +1,320 @@
+---
+title: "Medium State Analysis"
+output: html_document
+date: "2023-12-29"
+---
+
+Medium State Model: GLM vs Lasso Credibility
+
+This markdown is intended to be run after the countrywide and large state analysis so that the data needed are still in our environment. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in packages as needed
+
+```{r packages, echo=FALSE, include=FALSE}
+# Function to install and load packages
+install_and_load <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+# List of packages
+packages <- c("data.table", "statmod", "ggplot2", "tweedie", 
+              "glmnet", "HDtweedie", "plotly", "arrow", "knitr")
+
+# Install and load all packages
+sapply(packages, install_and_load)
+```
+
+Read in helper functions
+
+```{r echo=FALSE, include=FALSE}
+source( "helper_functions.R")
+```
+
+```{r}
+
+# This section follows the same format as the Large State
+
+medium_state_training_data <- training_data[subset == "medium_state"]
+medium_state_validate_data <- validate_data[subset == "medium_state"]
+
+cw_model_complement_of_credibility_vector <- medium_state_training_data$cw_model_complement_of_credibility
+
+# This is the data format needed for HDtweedie.
+medium_state_train_cols_for_matrix <- medium_state_training_data[, lasso_modeling_variables, with = FALSE]
+medium_state_validate_cols_for_matrix <- medium_state_validate_data[, lasso_modeling_variables, with = FALSE]
+
+# Reformatting to a matrix for HDtweedie so that Lasso Tweedie can work.
+medium_state_training_data_matrix <- as.matrix(medium_state_train_cols_for_matrix, rownames = FALSE)
+medium_state_validate_data_matrix <- as.matrix(medium_state_validate_cols_for_matrix, rownames = FALSE)
+
+# Losses and CV need to be a vector
+medium_state_training_loss_vector <- as.vector(medium_state_training_data$incurred_loss)
+medium_state_training_cv_vector <- as.vector(medium_state_training_data$stratification)
+recompute <- FALSE
+
+if (recompute) {
+# fit the lasso model with an offset
+medium_state_offset_lasso_model <- cv.HDtweedie(
+  x = medium_state_training_data_matrix,
+  y = (medium_state_training_loss_vector * (cw_model_complement_of_credibility_vector^(1 - 1.6)) / (cw_model_complement_of_credibility_vector^(2 - 1.6))),
+  group = NULL, p = 1.6,
+  weights = medium_state_training_data$exposure * (cw_model_complement_of_credibility_vector^(2 - 1.6)), lambda = NULL,
+  pred.loss = "deviance",
+  nfolds = 4, foldid = medium_state_training_cv_vector,
+  standardize = TRUE
+)  
+saveRDS(medium_state_offset_lasso_model, file = "medium_state_offset_lasso_model.rds")
+} else {
+  medium_state_offset_lasso_model <- readRDS("medium_state_offset_lasso_model.rds")
+}
+
+medium_state_glm_model <- glm(
+  formula = incurred_loss ~
+    driver_age_18_38_hinge + driver_age_38_76_hinge + driver_age_76_99_hinge +
+    vehicle_age_0_10_hinge + vehicle_age_10_99_hinge +
+    C(MultiPolicy) + C(xTreme_TurnSignal) + C(car_weight) + C(industry_code),
+  family = tweedie(1.6, link.power = 0),
+  weights = exposure,
+  data = medium_state_training_data
+)
+
+```
+
+
+
+```{r}
+
+summary(medium_state_glm_model)
+coef(medium_state_glm_model)
+
+```
+
+
+
+```{r}
+# Preparing the data for plotting
+data <- data.frame(
+  lambda = medium_state_offset_lasso_model$lambda,
+  cvm = medium_state_offset_lasso_model$cvm,
+  cvsd = medium_state_offset_lasso_model$cvsd
+)
+data$cvlower = data$cvm - data$cvsd
+data$cvupper = data$cvm + data$cvsd
+
+# Plotting
+ggplot(data, aes(x = lambda, y = cvm)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = cvlower, ymax = cvupper), alpha = 0.2) +
+  labs(x = "Lambda", y = "Mean Cross-Validated Error for Large state") +
+  theme_minimal()
+
+```
+
+```{r}
+
+coef(medium_state_offset_lasso_model, s = c("lambda.min"))
+```
+
+```{r}
+
+
+medium_state_offset_lasso_model$lambda
+
+# Now, we will compare the GLM vs. the Lasso with a complement of credibility
+
+
+# add the predictions to our training data
+medium_state_training_data[, glm_prediction := predict.glm(medium_state_glm_model, medium_state_training_data, type = "response")]
+medium_state_training_data[, credibility_weighted_prediction := predict(medium_state_offset_lasso_model, medium_state_training_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+
+
+medium_state_credibility_coeff_table <- create_credibility_coeff_table(
+  glm_model = medium_state_glm_model,
+  penalized_model = medium_state_offset_lasso_model,
+  complement_model = lasso_model
+)
+
+# Medium State GLM Coeff
+capture.output(summary(medium_state_glm_model))[c(13:36)]
+
+# Medium State Credibility Coeff Table
+print(medium_state_credibility_coeff_table)
+summary(medium_state_glm_model)
+
+write.csv(medium_state_credibility_coeff_table, file = "../Graphs/MediumState/CSV/mediumstate_coeff_table.csv", row.names = FALSE)
+
+```
+
+```{r more-medium-state-analysis}
+
+
+# Medium State Driver Age Relativity Plot
+# credibility_relativity_plot(medium_state_driver_age_table)
+
+# Medium State Vehicle Age Relativity Plot
+# credibility_relativity_plot(medium_state_vehicle_age_table)
+
+
+
+# Medium State Categorical Prediction and Relativity Plots
+# Figure 7.23
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "industry_code"))
+
+
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "industry_code"))
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "car_weight"))
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "car_weight"))
+
+
+# Continuous variable plots
+medium_state_driver_age_table <- get_credibility_driver_var_table(medium_state_training_data, medium_state_credibility_coeff_table, variable_name = "driver_age")
+medium_state_vehicle_age_table <- get_credibility_vehicle_var_table(medium_state_training_data, medium_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+# Medium State Continuous Prediction and Relativity Plots
+credibility_relativity_plot(medium_state_driver_age_table)
+credibility_prediction_plot(medium_state_driver_age_table)
+credibility_relativity_plot(medium_state_vehicle_age_table)
+credibility_prediction_plot(medium_state_vehicle_age_table)
+
+write.csv(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "industry_code"), file = "../Graphs/MediumState/CSV/industry_code_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "MultiPolicy"), file = "../Graphs/MediumState/CSV/multipolicy_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "xTreme_TurnSignal"), file = "../Graphs/MediumState/CSV/xtreme_turnsignal_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(medium_state_training_data, medium_state_credibility_coeff_table, "car_weight"), file = "../Graphs/MediumState/CSV/car_weight_table.csv", row.names = FALSE)
+write.csv(get_credibility_driver_var_table(medium_state_training_data, medium_state_credibility_coeff_table, variable_name = "driver_age"), file = "../Graphs/MediumState/CSV/driver_age_table.csv", row.names = FALSE)
+write.csv(get_credibility_vehicle_var_table(medium_state_training_data, medium_state_credibility_coeff_table, variable_name = "vehicle_age"), file = "../Graphs/MediumState/CSV/vehicle_age_table.csv", row.names = FALSE)
+
+# add the predictions to our holdout data and create plots
+medium_state_validate_data[, glm_prediction := predict.glm(medium_state_glm_model, medium_state_validate_data, type = "response")]
+medium_state_validate_data[, credibility_weighted_prediction := predict(medium_state_offset_lasso_model, medium_state_validate_data_matrix, s = "lambda.min") *
+  medium_state_validate_data$cw_model_complement_of_credibility]
+
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_validate_data, medium_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_validate_data, medium_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_validate_data, medium_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(medium_state_validate_data, medium_state_credibility_coeff_table, "car_weight"))
+
+medium_state_driver_age_table <- get_credibility_driver_var_table(medium_state_validate_data, medium_state_credibility_coeff_table, variable_name = "driver_age")
+medium_state_vehicle_age_table <- get_credibility_vehicle_var_table(medium_state_validate_data, medium_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+credibility_prediction_plot(medium_state_driver_age_table)
+credibility_prediction_plot(medium_state_vehicle_age_table)
+
+# Lift Charts for Medium State
+double_lift_chart(
+  dataset = medium_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = medium_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = medium_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = medium_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+
+```
+
+We now judgmentally select a higher value of lambda to be less reactive. 
+
+```{r more-lambda}
+
+### Medium State Increased Penalty Term ###
+medium_state_offset_lasso_model$lambda
+medium_state_offset_lasso_model$lambda.min
+
+
+increased_penalty_coeff <- create_credibility_coeff_table_alternate_lambda(
+  glm_model = medium_state_glm_model,
+  penalized_model = medium_state_offset_lasso_model,
+  complement_model = lasso_model,
+  alternate_lambda = 0.556990859
+)
+
+
+# Medium State Increased Penalty Driver Age
+# Figure 7.24
+credibility_relativity_plot(get_credibility_driver_var_table(medium_state_training_data, increased_penalty_coeff, variable_name = "driver_age"))
+
+# Medium State Increased Penalty Vehicle Age
+# Figure 7.25
+credibility_relativity_plot(get_credibility_vehicle_var_table(medium_state_training_data, increased_penalty_coeff, variable_name = "vehicle_age"))
+
+# Medium State Increased Penalty Industry Code
+# Figure 7.26
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "industry_code"))
+
+# Other plots for increased penalty model
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "car_weight"))
+
+write.csv(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "industry_code"), file = "../Graphs/MediumState/CSV/industry_code_increased_penalty_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "MultiPolicy"), file = "../Graphs/MediumState/CSV/multipolicy_increased_penalty_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "xTreme_TurnSignal"), file = "../Graphs/MediumState/CSV/xtreme_turnsignal_increased_penalty_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(medium_state_training_data, increased_penalty_coeff, "car_weight"), file = "../Graphs/MediumState/CSV/car_weight_increased_penalty_table.csv", row.names = FALSE)
+write.csv(get_credibility_driver_var_table(medium_state_training_data, increased_penalty_coeff, variable_name = "driver_age"), file = "../Graphs/MediumState/CSV/driver_age_increased_penalty_table.csv", row.names = FALSE)
+write.csv(get_credibility_vehicle_var_table(medium_state_training_data, increased_penalty_coeff, variable_name = "vehicle_age"), file = "../Graphs/MediumState/CSV/vehicle_age_increased_penalty_table.csv", row.names = FALSE)
+
+
+
+## Double LIft GLM vs. Increased Penalty
+# Figure 7.26
+double_lift_chart(
+  dataset = medium_state_training_data,
+  lasso_credibility = "increased_penalty_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+## Double LIft CW vs. Increased Penalty
+# Figure 7.27
+double_lift_chart(
+  dataset = medium_state_training_data,
+  lasso_credibility = "increased_penalty_prediction",
+  glm = "cw_model_complement_of_credibility",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+selected_columns <- medium_state_training_data[, c("increased_penalty_prediction", "cw_model_complement_of_credibility", "true_risk")]
+write.csv(selected_columns, file = "../Graphs/MediumState/CSV/medium_state_training_data_predictions.csv", row.names = FALSE)
+
+
+
+```

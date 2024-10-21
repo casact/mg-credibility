@@ -1,0 +1,583 @@
+---
+title: "Small State Analysis"
+output: html_document
+date: "2023-12-28"
+---
+
+
+Small State Model: GLM vs Lasso Credibility
+
+This markdown is intended to be run after the countrywide, large, and medium state analysis so that the data needed are still in our environment. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read in packages as needed
+
+```{r packages, echo=FALSE, include=FALSE}
+# Function to install and load packages
+install_and_load <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package)
+    library(package, character.only = TRUE)
+  }
+}
+
+# List of packages
+packages <- c("data.table", "statmod", "ggplot2", "tweedie", 
+              "glmnet", "HDtweedie", "plotly", "arrow", "knitr")
+
+# Install and load all packages
+sapply(packages, install_and_load)
+```
+
+Read in helper functions
+
+```{r echo=FALSE, include=FALSE}
+source( "helper_functions.R")
+```
+
+Read in the data as needed
+
+```{r pressure, echo=FALSE, include=FALSE}
+modeling_data <- read_parquet("output_file.parquet")
+
+```
+
+Prepare to model the small state data
+
+```{r, echo=FALSE, include=FALSE}
+
+# Subset the modeling_data table
+subset_data <- modeling_data[subset == "base_data", ]
+# Convert the data.table to a data.frame
+subset_df <- as.data.frame(subset_data)
+# Write the subset_df as a Parquet file
+
+
+# filter to training rows only
+training_data <- modeling_data[stratification %in% c(1, 2, 3, 4), ]
+
+# select modeling variables for Lasso
+lasso_modeling_variables <- c(
+  "driver_age_18_38_hinge", "driver_age_38_76_hinge", "driver_age_76_99_hinge",
+  "vehicle_age_0_10_hinge", "vehicle_age_10_99_hinge",
+  "multi_yes", "xTreme_yes",
+  "weight_heavy", "weight_light", "weight_extra_light",
+  "ind_construction", "ind_farming", "ind_finance_and_insurance",
+  "ind_fine_arts", "ind_fireworks", "ind_food_services",
+  "ind_health_care", "ind_real_estate", "ind_retail",
+  "ind_large_state", "ind_medium_state",
+  "ind_small_state", "ind_small_state_cw_dist"
+)
+
+# HDTweedie requires a matrix format for predictor variables. First, we will subset to all of the columns that we need.
+train_cols_for_matrix <- modeling_data[stratification %in% c(1, 2, 3, 4), lasso_modeling_variables, with = FALSE]
+validate_cols_for_matrix <- modeling_data[stratification %in% c(5), lasso_modeling_variables, with = FALSE]
+
+# Reformatting to a matrix for HDtweedie so that Lasso Tweedie can work.
+training_data_matrix <- as.matrix(train_cols_for_matrix, rownames = FALSE)
+validate_data_matrix <- as.matrix(validate_cols_for_matrix, rownames = FALSE)
+
+# This is the data format needed for creating our loss vector and CV vector below
+training_data <- modeling_data[stratification %in% c(1, 2, 3, 4), ]
+validate_data <- modeling_data[stratification %in% c(5), ]
+
+# Losses and CV need to be a vector
+loss_vector <- as.vector(training_data$incurred_loss)
+cv_vector <- as.vector(training_data$stratification)
+
+# As exposures are all 1, we will create this vector.
+weights <- rep(1, length(drop(loss_vector)))
+
+```
+
+Fit lasso credibility and GLM models
+
+```{r, echo=FALSE, include=FALSE}
+# We no longer need the state control variable
+lasso_modeling_variables <- lasso_modeling_variables[!(lasso_modeling_variables %in% c("ind_small_state", "ind_base_data", "ind_medium_state", "ind_large_state", "ind_small_state_cw_dist"))]
+
+
+
+#### Small State Model ####
+
+small_state_training_data <- training_data[subset == "small_state"]
+small_state_validate_data <- validate_data[subset == "small_state"]
+
+cw_model_complement_of_credibility_vector <- small_state_training_data$cw_model_complement_of_credibility
+
+
+# This is the data format needed for HDtweedie.
+small_state_train_cols_for_matrix <- small_state_training_data[, lasso_modeling_variables, with = FALSE]
+small_state_validate_cols_for_matrix <- small_state_validate_data[, lasso_modeling_variables, with = FALSE]
+
+# Reformatting to a matrix for HDtweedie so that Lasso Tweedie can work.
+small_state_training_data_matrix <- as.matrix(small_state_train_cols_for_matrix, rownames = FALSE)
+small_state_validate_data_matrix <- as.matrix(small_state_validate_cols_for_matrix, rownames = FALSE)
+
+# Losses and CV need to be a vector
+small_state_training_loss_vector <- as.vector(small_state_training_data$incurred_loss)
+small_state_training_cv_vector <- as.vector(small_state_training_data$stratification)
+
+# fit the lasso model with an offset
+
+recompute <- TRUE
+
+if (recompute) {
+
+small_state_offset_lasso_model <- cv.HDtweedie(
+  x = small_state_training_data_matrix,
+  y = (small_state_training_loss_vector * (cw_model_complement_of_credibility_vector^(1 - 1.6)) / (cw_model_complement_of_credibility_vector^(2 - 1.6))),
+  group = NULL, p = 1.6,
+  weights = small_state_training_data$exposure * (cw_model_complement_of_credibility_vector^(2 - 1.6)), lambda = NULL,
+  pred.loss = "deviance",
+  nfolds = 4, foldid = small_state_training_cv_vector,
+  standardize = TRUE
+)
+saveRDS(small_state_offset_lasso_model, file = "small_state_offset_lasso_model.rds")
+} else {
+  medium_state_offset_lasso_model <- readRDS("small_state_offset_lasso_model.rds")
+}
+
+# fit the GLM model (without an offset)
+small_state_glm_model <- glm(
+  formula = incurred_loss ~
+    driver_age_18_38_hinge + driver_age_38_76_hinge + driver_age_76_99_hinge +
+    vehicle_age_0_10_hinge + vehicle_age_10_99_hinge +
+    C(MultiPolicy) + C(xTreme_TurnSignal) + C(car_weight) + C(industry_code),
+  family = tweedie(1.6, link.power = 0),
+  weights = exposure,
+  data = small_state_training_data
+)
+
+```
+
+
+Show statistics of the glm. Note that many of these variables are insignificant. It would take significant work to make a reasonable model from this start. 
+
+```{r}
+summary(small_state_glm_model)
+```
+
+
+Show the CV plot for HDTweedie
+
+```{r plot}
+
+plot_lasso_model_cv_error(small_state_offset_lasso_model)
+
+```
+
+Now, we will compare the GLM vs. the Lasso with a complement of credibility
+
+
+```{r small-state-comparison}
+
+# add the predictions to our training data
+small_state_training_data[, glm_prediction := predict.glm(small_state_glm_model, small_state_training_data, type = "response")]
+small_state_training_data[, credibility_weighted_prediction := predict(small_state_offset_lasso_model, small_state_training_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+
+small_state_validate_data[, glm_prediction := predict.glm(small_state_glm_model, small_state_validate_data, type = "response")]
+small_state_validate_data[, credibility_weighted_prediction := predict(small_state_offset_lasso_model, small_state_validate_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+
+
+small_state_credibility_coeff_table <- create_credibility_coeff_table(
+  glm_model = small_state_glm_model,
+  penalized_model = small_state_offset_lasso_model,
+  complement_model = lasso_model
+)
+# Small Subset 1 GLM coefficients
+capture.output(summary(small_state_glm_model))[c(13:36)]
+
+# Small Subset 1 Credibility Coeff Table
+summary(small_state_glm_model)
+print(small_state_credibility_coeff_table)
+write.csv(small_state_credibility_coeff_table, file = "../Graphs/SmallState/CSV/smallstate_coeff_table.csv", row.names = FALSE)
+
+
+# Small Subset 1 MultiPolicy Discount
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "MultiPolicy"))
+
+# Small Subset 1 xTreme Turn Signal Discount
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "xTreme_TurnSignal"))
+
+# Small Subset 1 Industry Code
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "industry_code"))
+
+
+# Additional Prediction and Relativity Plots
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "industry_code"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "car_weight"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_training_data, small_state_credibility_coeff_table, "car_weight"))
+
+
+small_state_driver_age_table <- get_credibility_driver_var_table(small_state_training_data, small_state_credibility_coeff_table, variable_name = "driver_age")
+small_state_vehicle_age_table <- get_credibility_vehicle_var_table(small_state_training_data, small_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+credibility_relativity_plot(small_state_driver_age_table)
+credibility_prediction_plot(small_state_driver_age_table)
+credibility_relativity_plot(small_state_vehicle_age_table)
+credibility_prediction_plot(small_state_vehicle_age_table)
+
+
+# add the predictions to our holdout data and create charts
+small_state_validate_data[, glm_prediction := predict.glm(small_state_glm_model, small_state_validate_data, type = "response")]
+small_state_validate_data[, credibility_weighted_prediction := predict(small_state_offset_lasso_model, small_state_validate_data_matrix, s = "lambda.min") *
+  small_state_validate_data$cw_model_complement_of_credibility]
+
+print(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "industry_code"))
+
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "industry_code"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "car_weight"))
+
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_state_validate_data, small_state_credibility_coeff_table, "car_weight"))
+
+
+small_state_driver_age_table <- get_credibility_driver_var_table(small_state_validate_data, small_state_credibility_coeff_table, variable_name = "driver_age")
+small_state_vehicle_age_table <- get_credibility_vehicle_var_table(small_state_validate_data, small_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+
+credibility_prediction_plot(small_state_driver_age_table)
+credibility_prediction_plot(small_state_vehicle_age_table)
+
+
+```
+
+In the lift charts below, we can see that our lasso credibility model outperforms both the GLM and the countrywide model. However, this is not the most optimal model, as some of the univariate charts suggest that we should try a higher credibility standard. 
+
+```{r small-state-double-lift}
+
+
+## Small Data Lift Chart Lasso vs. GLM
+# Figure 7.28
+double_lift_chart(
+  dataset = small_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+
+
+## Small Data Lift Chart Lasso vs. CW
+# Figure 7.29
+double_lift_chart(
+  dataset = small_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "cw_model_complement_of_credibility",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+
+double_lift_chart(
+  dataset = small_state_training_data,
+  lasso_credibility = "cw_model_complement_of_credibility",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+double_lift_chart(
+  dataset = small_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = small_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = small_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+### Small State Increased Penalty Term ###
+small_state_offset_lasso_model$lambda
+small_state_offset_lasso_model$lambda.min
+
+
+increased_penalty_coeff <- create_credibility_coeff_table_alternate_lambda(
+  glm_model = small_state_glm_model,
+  penalized_model = small_state_offset_lasso_model,
+  complement_model = lasso_model,
+  alternate_lambda = 1.374307155
+)
+
+print(increased_penalty_coeff)
+
+
+
+small_state_training_data[, increased_penalty_prediction := predict(small_state_offset_lasso_model, small_state_training_data_matrix,
+  s = 0.556990859,
+  weights = exposure
+) * cw_model_complement_of_credibility]
+
+```
+
+By applying actuarial judgment to increase our credibility standard, we arrive at a more actuarially sound model. 
+
+```{r small-state-cw-increased-penalty}
+
+
+
+# Increased Penalty Driver Age
+credibility_relativity_plot(get_credibility_driver_var_table(small_state_training_data, increased_penalty_coeff, variable_name = "driver_age"))
+
+# Increased Penalty Vehicle Age
+credibility_relativity_plot(get_credibility_vehicle_var_table(small_state_training_data, increased_penalty_coeff, variable_name = "vehicle_age"))
+
+# Increased Penalty Industry Code
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, increased_penalty_coeff, "industry_code"))
+
+# Other plots for increased penalty model
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, increased_penalty_coeff, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, increased_penalty_coeff, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_state_training_data, increased_penalty_coeff, "car_weight"))
+
+
+## Small State Increased Penalty vs. CW
+# Figure 7.30
+double_lift_chart(
+  dataset = small_state_training_data,
+  lasso_credibility = "increased_penalty_prediction",
+  glm = "cw_model_complement_of_credibility",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+
+double_lift_chart(
+  dataset = small_state_training_data,
+  lasso_credibility = "increased_penalty_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+selected_columns <- small_state_training_data[, c("increased_penalty_prediction", "cw_model_complement_of_credibility",
+                                                  "glm_prediction", "credibility_weighted_prediction", "true_risk")]
+write.csv(selected_columns, file = "../Graphs/SmallState/CSV/small_state_training_data_predictions.csv", row.names = FALSE)
+
+
+```
+
+We will fit our last models on the second small state subset which contains the same relativities as the base modeling data. 
+
+```{r small-state-cw}
+
+#### Small State with Base Modeling Data Relativities ###
+
+small_cw_dist_state_training_data <- training_data[subset == "small_cw_dist_state"]
+small_cw_dist_state_validate_data <- validate_data[subset == "small_cw_dist_state"]
+
+cw_model_complement_of_credibility_vector <- small_cw_dist_state_training_data$cw_model_complement_of_credibility
+
+# This is the data format needed for HDtweedie.
+small_cw_dist_state_train_cols_for_matrix <- small_cw_dist_state_training_data[, lasso_modeling_variables, with = FALSE]
+small_cw_dist_state_validate_cols_for_matrix <- small_cw_dist_state_validate_data[, lasso_modeling_variables, with = FALSE]
+
+# Reformatting to a matrix for HDtweedie so that Lasso Tweedie can work.
+small_cw_dist_state_training_data_matrix <- as.matrix(small_cw_dist_state_train_cols_for_matrix, rownames = FALSE)
+small_cw_dist_state_validate_data_matrix <- as.matrix(small_cw_dist_state_validate_cols_for_matrix, rownames = FALSE)
+
+# Losses and CV need to be a vector
+small_cw_dist_state_training_loss_vector <- as.vector(small_cw_dist_state_training_data$incurred_loss)
+small_cw_dist_state_training_cv_vector <- as.vector(small_cw_dist_state_training_data$stratification)
+
+# fit the lasso model with an offset
+
+
+recompute <- FALSE
+
+if (recompute) {
+small_cw_dist_state_offset_lasso_model <- cv.HDtweedie(
+  x = small_cw_dist_state_training_data_matrix,
+  y = (small_cw_dist_state_training_loss_vector * (cw_model_complement_of_credibility_vector^(1 - 1.6)) / (cw_model_complement_of_credibility_vector^(2 - 1.6))),
+  group = NULL, p = 1.6,
+  weights = small_cw_dist_state_training_data$exposure * (cw_model_complement_of_credibility_vector^(2 - 1.6)), lambda = NULL,
+  pred.loss = "deviance",
+  nfolds = 4, foldid = small_cw_dist_state_training_cv_vector,
+  standardize = TRUE
+)
+  saveRDS(small_cw_dist_state_offset_lasso_model, file = "small_cw_dist_state_offset_lasso_model.rds")
+} else {
+  small_cw_dist_state_offset_lasso_model <- readRDS("lsmall_cw_dist_state_offset_lasso_model.rds")
+}
+
+
+# Fit the GLM model without an offset
+small_cw_dist_state_glm_model <- glm(
+  formula = incurred_loss ~
+    driver_age_18_38_hinge + driver_age_38_76_hinge + driver_age_76_99_hinge +
+    vehicle_age_0_10_hinge + vehicle_age_10_99_hinge +
+    C(MultiPolicy) + C(xTreme_TurnSignal) + C(car_weight) + C(industry_code),
+  family = tweedie(1.6, link.power = 0),
+  weights = exposure,
+  data = small_cw_dist_state_training_data
+)
+
+
+
+```
+
+The charts below show that the optimal lasso credibility model has collapsed completely to the complement. All of the code to create additional graphs is provided for completeness and reusability. 
+
+```{r comparison-sm}
+# Now, we will compare the GLM vs. the Lasso with a complement of credibility
+
+# add the predictions to our training data
+small_cw_dist_state_training_data[, glm_prediction := predict.glm(small_cw_dist_state_glm_model, small_cw_dist_state_training_data, type = "response")]
+small_cw_dist_state_training_data[, credibility_weighted_prediction := predict(small_cw_dist_state_offset_lasso_model, small_cw_dist_state_training_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+
+small_cw_dist_state_validate_data[, glm_prediction := predict.glm(small_cw_dist_state_glm_model, small_cw_dist_state_validate_data, type = "response")]
+small_cw_dist_state_validate_data[, credibility_weighted_prediction := predict(small_cw_dist_state_offset_lasso_model, small_cw_dist_state_validate_data_matrix,
+  s = "lambda.min",
+  weights = exposure
+) * cw_model_complement_of_credibility]
+
+small_cw_dist_state_credibility_coeff_table <- create_credibility_coeff_table(
+  glm_model = small_cw_dist_state_glm_model,
+  penalized_model = small_cw_dist_state_offset_lasso_model,
+  complement_model = lasso_model
+)
+
+# Small Subset 2 GLM coefficients
+capture.output(summary(small_cw_dist_state_glm_model))[c(13:36)]
+
+# Small Subset 2 Credibility Coeff Table
+print(small_cw_dist_state_credibility_coeff_table)
+write.csv(small_cw_dist_state_credibility_coeff_table, file = "../Graphs/SmallState/CSV/smallstate_cw_dist_coeff_table.csv", row.names = FALSE)
+
+
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "industry_code"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "car_weight"))
+
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "car_weight"))
+
+small_cw_dist_state_driver_age_table <- get_credibility_driver_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, variable_name = "driver_age")
+small_cw_dist_state_vehicle_age_table <- get_credibility_vehicle_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+credibility_relativity_plot(small_cw_dist_state_driver_age_table)
+credibility_relativity_plot(small_cw_dist_state_vehicle_age_table)
+
+credibility_prediction_plot(small_cw_dist_state_driver_age_table)
+credibility_prediction_plot(small_cw_dist_state_vehicle_age_table)
+
+write.csv(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "industry_code"), file = "../Graphs/SmallState/CSV/industry_code_cw_dist_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "MultiPolicy"), file = "../Graphs/SmallState/CSV/multipolicy_cw_dist_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "xTreme_TurnSignal"), file = "../Graphs/SmallState/CSV/xtreme_turnsignal_cw_dist_table.csv", row.names = FALSE)
+write.csv(get_credibility_cat_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, "car_weight"), file = "../Graphs/SmallState/CSV/car_weight_cw_dist_table.csv", row.names = FALSE)
+write.csv(get_credibility_driver_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, variable_name = "driver_age"), file = "../Graphs/SmallState/CSV/driver_age_cw_dist_table.csv", row.names = FALSE)
+write.csv(get_credibility_vehicle_var_table(small_cw_dist_state_training_data, small_cw_dist_state_credibility_coeff_table, variable_name = "vehicle_age"), file = "../Graphs/SmallState/CSV/vehicle_age_cw_dist_table.csv", row.names = FALSE)
+
+
+# add the predictions to our holdout data
+small_cw_dist_state_validate_data[, glm_prediction := predict.glm(small_cw_dist_state_glm_model, small_cw_dist_state_validate_data, type = "response")]
+small_cw_dist_state_validate_data[, credibility_weighted_prediction := predict(small_cw_dist_state_offset_lasso_model, small_cw_dist_state_validate_data_matrix, s = "lambda.min") *
+  small_cw_dist_state_validate_data$cw_model_complement_of_credibility]
+
+
+small_cw_dist_state_credibility_coeff_table <- create_credibility_coeff_table(
+  glm_model = small_cw_dist_state_glm_model,
+  penalized_model = small_cw_dist_state_offset_lasso_model,
+  complement_model = lasso_model
+)
+
+print(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "industry_code"))
+
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "industry_code"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "MultiPolicy"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_relativity_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "car_weight"))
+
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "industry_code"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "MultiPolicy"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "xTreme_TurnSignal"))
+credibility_prediction_plot(get_credibility_cat_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, "car_weight"))
+
+
+small_cw_dist_state_driver_age_table <- get_credibility_driver_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, variable_name = "driver_age")
+small_cw_dist_state_vehicle_age_table <- get_credibility_vehicle_var_table(small_cw_dist_state_validate_data, small_cw_dist_state_credibility_coeff_table, variable_name = "vehicle_age")
+
+
+credibility_prediction_plot(small_cw_dist_state_driver_age_table)
+credibility_prediction_plot(small_cw_dist_state_vehicle_age_table)
+
+# Lift Charts
+double_lift_chart(
+  dataset = small_cw_dist_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = small_cw_dist_state_training_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = small_cw_dist_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "true_risk",
+  normalize = TRUE
+)
+
+double_lift_chart(
+  dataset = small_cw_dist_state_validate_data,
+  lasso_credibility = "credibility_weighted_prediction",
+  glm = "glm_prediction",
+  actual = "incurred_loss",
+  normalize = TRUE
+)
+
+```
+
+
